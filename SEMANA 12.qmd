@@ -1,0 +1,304 @@
+---
+title: "TRABAJO 12"
+format: html
+editor: visual
+---
+
+## Cargar los paquetes
+
+```{r}
+install.packages("performance")
+install.packages("gtsummary")
+library(tidyverse)
+library(here)
+library(rio)
+library(gtsummary)
+library(car)
+library(survival)
+library(performance)
+library(forcats) 
+```
+
+## Analisis univariado y multivariado
+
+### El dataset
+
+Para ilustrar el proceso de análisis multivariado en un modelo de regresión logística, se empleará el dataset tiroides. Este conjunto de datos incluye información de pacientes diagnosticados con carcinoma papilar de tiroides. Las variables registradas comprenden la presencia de recurrencia tumoral (sí o no), edad (en años), género (femenino o masculino), antecedentes de tabaquismo (fumador actual e historia de tabaquismo), antecedentes de radioterapia previa, función tiroidea basal (eutiroideo u otros), hallazgos al examen físico (bocio nodular único o multinodular), presencia de adenopatías, tipo de patología histológica, características de la focalidad tumoral (unifocal o multifocal), estratificación de riesgo, estadificación TNM (clasificaciones T, N, M y etapa clínica), así como la respuesta al tratamiento inicial. Estas variables serán consideradas como potenciales factores de riesgo en el análisis de recurrencia de la enfermedad.
+
+Cargando los datos
+
+```{r}
+tiroides <- read_csv("tiroides.csv")
+```
+
+Un vistazo a los datos
+
+```{r}
+head(tiroides)
+```
+
+### 2.2 El análisis univariado
+
+En esta sección se estimarán los Odds Ratios (OR) de cada variable de manera independiente, es decir, sin ajuste por otras covariables.
+
+Antes de realizar este análisis, es necesario definir las categorías de referencia para las variables categóricas mediante la función mutate() en combinación con relevel(). Este paso asegura que la interpretación de los OR se haga en relación con la categoría de referencia seleccionada. El resultado se guarda en un nuevo objeto llamado datatiroides
+
+```{r}
+library(dplyr)
+tiroides_1 <- tiroides |> 
+  mutate(Recurrencia = relevel(as.factor(Recurrencia), ref = "No"),
+    Genero = relevel(as.factor(Genero), ref = "Femenino"),
+    Focalidad = relevel(as.factor(Focalidad), ref = "Unifocal")
+  ) |> 
+  na.omit()
+```
+
+Para obtener la tabla con los resultados del análisis univariado, se utiliza la función `tbl_uvregression()`, que permite generar tablas con las estimaciones de regresión logística para cada variable incluida. Entre sus argumentos se especifican el método de regresión, las variables a analizar, la familia de distribución (binomial para modelos logísticos), y opciones de presentación de los resultados como los intervalos de confianza, valores p y formato de los estimadores.
+
+```{r}
+install.packages("broom.helpers")
+```
+
+```{r}
+
+tabla_reg_log_univ <- tiroides_1 |> 
+  tbl_uvregression(
+    include = c(Edad, Genero, Historia_Radioterapia, Focalidad, Respuesta),
+    y = Recurrencia,
+    method = glm,
+    method.args = list(family = binomial),
+    exponentiate = TRUE,
+    conf.int = TRUE,
+    hide_n = TRUE,
+    add_estimate_to_reference_rows = FALSE,
+    pvalue_fun = ~ style_pvalue(.x, digits = 3),
+    estimate_fun = ~ style_number(.x, digits = 2),
+    label = list(
+      Edad ~ "Edad (años)",
+      Genero ~ "Género",
+      Historia_Radioterapia ~ "Historia Radioterapia",
+      Focalidad ~ "Focalidad tumoral",
+      Respuesta ~ "Respuesta inicial"
+    )
+  ) |> 
+  bold_labels() |> 
+  bold_p(t = 0.05) |> 
+  modify_header(estimate = "**OR no ajustado**", p.value = "**valor p**")
+```
+
+En esta tabla, los resultados se expresan como odds ratios no ajustados (OR) con sus respectivos intervalos de confianza al 95% y valores p.
+
+```{r}
+tabla_reg_log_univ
+```
+
+Para la interpretación de las variables categóricas, se consideran las categorías de referencia indicadas previamente. Las odds ratios (OR) mayores a 1 sugieren una mayor probabilidad de presentar recurrencia en comparación con la categoría de referencia.
+
+En cuanto a la variable numérica Edad, se observa que presenta un OR mayor a 1 (OR = 1.04), lo que sugiere una asociación positiva con el desenlace (recurrencia tumoral). Este resultado indica que, por cada incremento de un año en la edad del paciente, las probabilidades (odds) de presentar recurrencia aumentan en un 4% (OR = 1.04; IC95%: 1.02–1.05; p\<0.001).
+
+En las variables categóricas, el género masculino mostró una probabilidad de recurrencia significativamente mayor en comparación con el femenino (OR = 5.40; IC95%: 3.14–9.39; p\<0.001), es decir, los hombres tienen aproximadamente 5 veces más riesgo de presentar recurrencia que las mujeres.
+
+Los pacientes con antecedente de radioterapia mostraron un riesgo 16 veces mayor de recurrencia respecto a quienes no la recibieron (OR = 16.12; IC95%: 2.71–306.37; p=0.010).
+
+Respecto a la focalidad tumoral, los casos multifocales tuvieron un riesgo aproximadamente 6 veces mayor de recurrencia en comparación con los unifocales (OR = 5.83; IC95%: 3.63–9.53; p\<0.001).
+
+Finalmente, la respuesta inicial al tratamiento mostró los riesgos más elevados: los pacientes con respuesta incompleta bioquímica tuvieron un riesgo 189 veces mayor (OR = 189.75), aquellos con respuesta incompleta estructural un riesgo extremadamente elevado de 9,211 veces (OR = 9,211.50), y los de respuesta indeterminada un riesgo 26 veces mayor (OR = 26.83), todos estadísticamente significativos (p\<0.05).
+
+### El análisis multivariado
+
+Para el análisis de regresión logística multivariada, se aplicó una estrategia de selección automática de variables utilizando tres enfoques: eliminación hacia atrás (*backward elimination*), selección hacia adelante (*forward selection*) y selección paso a paso (*stepwise selection)*.
+
+**Paso 1. Ajuste del modelo inicial**
+
+Ajustamos un modelo de regresión logística binaria que incluya todas las variables candidatas
+
+```{r}
+tiroides$Recurrencia <- factor(tiroides$Recurrencia, levels = c("No", "Sí"))
+```
+
+```{r}
+var_modelo <- glm(
+  Recurrencia ~ Edad + Genero + Historia_Radioterapia + Focalidad + Respuesta,
+  data = tiroides,
+  family = binomial(link = "logit")
+)
+```
+
+**Paso 2a. Realizamos la selección de variables** usando la técnica Eliminación hacia atrás (Backward elimination).
+
+```{r}
+multi_backward <- var_modelo |>
+  step(direction = "backward", trace = FALSE)
+```
+
+**Paso 2b. Realizamos la selección de variables** usando la técnica Selección hacia adelante (Forward selection).
+
+```{r}
+multi_forward <- var_modelo |>
+  step(direction = "forward", trace = FALSE)
+```
+
+**Paso 3c. Realizamos la selección de variables** usando la técnica Selección paso a paso (Stepwise selection).
+
+```{r}
+multi_stepwise <- var_modelo |>
+  step(direction = "both", trace = FALSE)
+```
+
+Los resultados de la selección de las variables para el modelo se han guardado en los objetos: multi_backward, multi_forward, y multi_stepwise. El siguiente paso es comparar los valores de AIC y la multicolinealidad entre las variables seleccionadas por cada uno de los modelos.
+
+**Paso 3. Estimados el AIC para los modelos.**
+
+Podemos visualizar el AIC y cuáles variables han sido seleccionadas en cada modelo, usando la función summary.
+
+```{r}
+summary(multi_backward)
+```
+
+En el análisis multivariado, la respuesta inicial al tratamiento fue el principal factor asociado a la recurrencia. Los pacientes con respuesta incompleta estructural, incompleta bioquímica e indeterminada presentaron riesgos de recurrencia significativamente mayores en comparación con quienes alcanzaron una respuesta excelente. La edad mostró una asociación positiva con la recurrencia (incremento aproximado del 3% por año), aunque sin alcanzar significancia estadística (p = 0.069). El género no se mantuvo como predictor independiente tras el ajuste.
+
+```{r}
+summary(multi_forward)
+```
+
+En el análisis multivariado con selección hacia adelante, la respuesta inicial al tratamiento se mantuvo como principal predictor independiente de recurrencia, con riesgos significativamente elevados en los grupos de respuesta incompleta (bioquímico, estructural e indeterminado). La edad mostró una tendencia positiva (OR ajustado 1.03 por año), aunque sin alcanzar significación estadística (p = 0.097). Género, radioterapia y focalidad no se asociaron significativamente a recurrencia tras el ajuste.
+
+```{r}
+summary(multi_stepwise)
+```
+
+En el modelo multivariado obtenido por selección stepwise, la respuesta inicial al tratamiento fue el principal predictor de recurrencia. Los grupos con respuesta incompleta bioquímica, estructural e indeterminada mostraron riesgos significativamente elevados frente a la respuesta excelente. La edad mostró una tendencia positiva (OR 1.03 por año; p=0.069), sin alcanzar significancia. El género no fue predictor independiente tras el ajuste.
+
+### 2.5 Evaluación de colinealidad
+
+Finalmente, evaluamos la colinealidad usando la función `check_collinearity()` del paquete `performance`.
+
+```{r}
+performance::check_collinearity(multi_backward, ci = NULL)
+```
+
+Los valores de VIF (Variance Inflation Factor) son todos cercanos a 1 (entre 1.04 y 1.10).
+
+Los valores de tolerancia son cercanos a 1 (superiores a 0.90).
+
+No existe evidencia de colinealidad entre las variables incluidas en el modelo.
+
+La multicolinealidad no es un problema en este modelo multivariado.
+
+Podemos confiar en la estabilidad de los coeficientes estimados.
+
+```{r}
+performance::check_collinearity(multi_forward, ci = NULL)
+```
+
+Todos los VIF siguen siendo muy bajos (entre 1.02 y 1.14).
+
+Las tolerancias están todas por encima de 0.88.
+
+No existe presencia de multicolinealidad significativa.
+
+Las variables incluidas en el modelo no presentan problemas de correlación entre sí.
+
+La estimación de los coeficientes del modelo es estable y confiable.
+
+```{r}
+performance::check_collinearity(multi_stepwise, ci = NULL)
+```
+
+Todos los valores de VIF son bajos (máximo 1.10).
+
+Las tolerancias están por encima de 0.90.
+
+No existe evidencia de multicolinealidad relevante.
+
+Las variables incluidas en el modelo son independientes entre sí.
+
+Los coeficientes estimados son estables y confiables.
+
+## 2.6 Conclusión
+
+Los modelos generados mediante eliminación hacia atrás (backward elimination) y selección paso a paso (stepwise selection) mostraron valores de VIF bajos y cercanos a 1, indicando ausencia de colinealidad relevante entre las variables incluidas. De manera similar, el modelo obtenido mediante selección hacia adelante (forward selection) presentó también valores bajos de VIF para todas las variables retenidas, sin evidencias de multicolinealidad.
+
+En todos los modelos seleccionados, la variable respuesta inicial al tratamiento fue consistentemente identificada como el principal predictor independiente de recurrencia. La edad mostró una tendencia positiva no significativa en todos los modelos, mientras que variables como género, focalidad y radioterapia no fueron seleccionadas consistentemente o no alcanzaron significancia estadística tras el ajuste.
+
+## 2.7 Modelo final
+
+Con base en los resultados de ajuste (AIC) y la evaluación de colinealidad (VIF), se concluye que el modelo óptimo es el obtenido mediante las técnicas de eliminación hacia atrás (backward elimination) o selección paso a paso (stepwise selection), dado que ambos modelos produjeron exactamente el mismo conjunto de variables.
+
+El modelo final incluye tres variables independientes: edad, género y respuesta inicial al tratamiento, las cuales serán reportadas en el análisis multivariado definitivo.
+
+## 3 Reporte del análisis univariado y multivariado
+
+Como en las sesiones anteriores, reportaremos los resultados del modelo final de regresión logística.
+
+Tabla para los resultados de la regresión univariado (no ajustado)
+
+```{r}
+tabla_univ <- tiroides_1 |> 
+  tbl_uvregression(
+    include = c(Edad, Genero, Historia_Radioterapia, Focalidad, Respuesta),
+    y = Recurrencia,
+    method = glm,
+    method.args = list(family = binomial),
+    exponentiate = TRUE,
+    conf.int = TRUE,
+    hide_n = TRUE,
+    add_estimate_to_reference_rows = FALSE,
+    pvalue_fun = ~ style_pvalue(.x, digits = 3),
+    estimate_fun = ~ style_number(.x, digits = 2),
+    label = list(
+      Edad ~ "Edad (años)",
+      Genero ~ "Género",
+      Historia_Radioterapia ~ "Historia Radioterapia",
+      Focalidad ~ "Focalidad tumoral",
+      Respuesta ~ "Respuesta inicial"
+    )
+  ) |> 
+  bold_labels() |> 
+  bold_p(t = 0.05) |> 
+  modify_header(estimate = "**OR no ajustado**", p.value = "**valor p**")
+```
+
+Tabla para los resultados de la regresión multivariable (ajustado)
+
+```{r}
+tabla_multi <- multi_backward |> 
+  tbl_regression(
+    exponentiate = TRUE,
+    conf.int = TRUE,
+    pvalue_fun = ~ style_pvalue(.x, digits = 3),
+    estimate_fun = ~ style_number(.x, digits = 2),
+    label = list(
+      Edad ~ "Edad (años)",
+      Genero ~ "Género",
+      Respuesta ~ "Respuesta inicial"
+    )
+  ) |> 
+  bold_labels() |> 
+  bold_p(t = 0.05) |> 
+  modify_header(estimate = "**OR ajustado**", p.value = "**valor p**")
+```
+
+La tabla final la construimos usando la función `tbl_merge()`. De modo que la tabla del análisis univariado o no ajustado y multivariado o ajustado, se muestren lado a lado.
+
+```{r}
+tabla_final <- 
+  tbl_merge(
+    list(tabla_univ, tabla_multi),
+    tab_spanner = c("**Univariado**", "**Multivariado**")
+  )
+```
+
+```{r}
+tabla_final
+```
+
+En el modelo de regresión logística ajustado, la respuesta inicial al tratamiento fue el principal factor asociado de manera significativa con la recurrencia tumoral.
+
+Los pacientes con respuesta incompleta bioquímica presentaron un riesgo de recurrencia 145 veces mayor (OR = 144.51; IC95%: 24.25–2,791.18; p \< 0.001), mientras que aquellos con respuesta incompleta estructural mostraron un riesgo aún más elevado, aproximadamente 8,125 veces mayor (OR = 8,125.42; IC95%: 1,070.45–193,666.68; p \< 0.001).
+
+Por su parte, los pacientes con respuesta indeterminada tuvieron un riesgo 20 veces mayor de recurrencia (OR = 20.62; IC95%: 3.47–393.13; p = 0.005).
+
+En cuanto a la edad, por cada año adicional se observó un incremento del 3% en las probabilidades de recurrencia (OR = 1.03; IC95%: 1.00–1.07; p = 0.069), aunque este resultado no alcanzó significación estadística convencional.
+
+Por otro lado, las variables género, historia de radioterapia y focalidad tumoral no mostraron asociación estadísticamente significativa tras el ajuste por las demás variables del modelo.
